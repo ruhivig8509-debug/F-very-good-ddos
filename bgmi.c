@@ -11,7 +11,7 @@
 #include <netinet/udp.h>
 #include <netinet/ip_icmp.h>
 #include <sys/time.h>
-
+#include <fcntl.h> 
 // ============================================
 // MAX POWER CONFIGURATION
 // ============================================

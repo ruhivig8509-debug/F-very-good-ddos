@@ -145,7 +145,7 @@ def send_welcome(message):
     
     welcome_msg = (
         f"🎯 *Po Pvt DDoS Bot*\n\n"
-        f"👤 *User:* @{@PARI_X_QNR}\n"
+        f"👤 *User:* @PARI_X_QNR\n"
         f"{status_text}\n\n"
         f"📌 *Commands:*\n"
         f"🔹 /attack IP PORT TIME - Launch attack\n"

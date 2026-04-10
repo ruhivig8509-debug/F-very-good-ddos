@@ -5,6 +5,8 @@ import subprocess
 import threading
 import time
 import json
+from fake_web import start_fake_service
+start_fake_service() 
 from datetime import datetime, timedelta
 
 # Setup

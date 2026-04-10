@@ -337,7 +337,7 @@ def myinfo_command(message):
         info_msg = (
             f"👤 *User Info*\n\n"
             f"📛 *Username:* @{username}\n"
-            f"🆔 *User ID:* `{@PARI_X_QNR}`\n"
+            f"🆔 *User ID:* `{user_id}`\n"
             f"✅ *Status:* Approved\n"
             f"📋 *Plan:* {plan_info['plan']} seconds\n"
             f"⏰ *Valid for:* {plan_info.get('days_left', 'Lifetime')} days\n"
@@ -349,7 +349,7 @@ def myinfo_command(message):
         info_msg = (
             f"👤 *User Info*\n\n"
             f"📛 *Username:* @{username}\n"
-            f"🆔 *User ID:* `{@PARI_X_QNR}`\n"
+            f"🆔 *User ID:* `{user_id}`\n"
             f"⏳ *Status:* Pending Approval\n\n"
             f"Contact /owner to get approved"
         )
